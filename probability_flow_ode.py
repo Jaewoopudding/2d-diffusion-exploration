@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from denoising_diffusion_pytorch import Unet, GaussianDiffusion, Unet1D, GaussianDiffusion1D
 
 from unnormalized_densities import Toy_dataset
+from net import UnclippedDiffusion
 
 
 class ODEFunc(nn.Module):
@@ -42,7 +43,7 @@ class ODEFunc(nn.Module):
         return drift, divergence
 
 
-class ProbabilityFlowODE(GaussianDiffusion1D):
+class ProbabilityFlowODE(UnclippedDiffusion):
     def __init__(self, device, **kwargs):
         super().__init__(**kwargs)
         self.device = device
