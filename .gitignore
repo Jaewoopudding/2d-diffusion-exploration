@@ -1,5 +1,5 @@
 *.png
 *.pth
-*.pth
+*.pt
 wandb/*
 *.pyc
