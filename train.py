@@ -1,20 +1,22 @@
 import argparse
 import os
 
+import numpy as np
 import torch
 import wandb
 import matplotlib.pyplot as plt
-from denoising_diffusion_pytorch import Unet, GaussianDiffusion, Unet1D, GaussianDiffusion1D
 from unnormalized_densities import Toy_dataset
 from torch.utils.data import DataLoader
 from tqdm import trange
+
+from net import MLP, UnclippedDiffusion
 
 # Command-line arguments
 parser = argparse.ArgumentParser(description="Train a Gaussian Diffusion Model")
 parser.add_argument('--batchsize', type=int, default=1024, help='Batch size for training')
 parser.add_argument('--datanum', type=int, default=200000, help='Number of data points in the dataset')
 parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs for training')
-parser.add_argument('--distribution', type=str, default='8gaussians', help='Distribution for training diffusion model')
+parser.add_argument('--distribution', type=str, default='elliptic_paraboloid', help='Distribution for training diffusion model')
 args = parser.parse_args()
 
 
@@ -30,24 +32,19 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 wandb.init(
     entity='gda-for-orl',
     project='toy-explore',
+    name=args.distribution,
 )
 
-# Model setup
-unet = Unet1D(
-    dim=64,
-    init_dim=2,
-    channels=1,
-    dim_mults=(1, 2),
-)
+model = MLP()
 
-diffusion = GaussianDiffusion1D(
-    unet,
+diffusion = UnclippedDiffusion(
+    model=model,
     seq_length=2,
     timesteps=100,
-    auto_normalize=False
+    auto_normalize=False,
 )
 
-unet = unet.to(device)
+model = model.to(device)
 diffusion = diffusion.to(device)
 # Dataset and DataLoader
 custom = Toy_dataset(args.distribution, minimum=0, datanum=args.datanum, device=device)
@@ -79,18 +76,29 @@ for epoch in trange(args.num_epochs):
     # Sample and log images after each epoch
     if (epoch % 10) == 0: 
         sampled_images = diffusion.sample(batch_size=int(args.datanum/10)).squeeze(1).cpu().detach().numpy()  # Shape: (1000, 2)
+        within_bounds = np.all((sampled_images >= -5) & (sampled_images <= 5), axis=1)
+        proportion_within_bounds = np.mean(within_bounds)
+        wandb.log(
+            {},
+            step=epoch
+        )
         plt.figure(figsize=(8, 8))
         plt.scatter(sampled_images[:, 0], sampled_images[:, 1], alpha=0.2, s=1)
-        plt.title(f"Sampled Images at Epoch {epoch + 1}")
+        plt.title(f"Sampled Images at Epoch {epoch + 1} | {proportion_within_bounds * 100:.2f}%")
         plt.xlabel("Dimension 1")
         plt.ylabel("Dimension 2")
+        plt.xlim([-5,5])
+        plt.ylim([-5,5])
         plt.grid(True)
 
         # Save and log plot to wandb
         plot_file = f"images/{args.distribution}/epoch_{epoch + 1}_samples.png"
         plt.savefig(plot_file, dpi=300)
         wandb.log(
-            {"samples_epoch": wandb.Image(plot_file)},
+            {
+                "samples_epoch": wandb.Image(plot_file),
+                "Proportion_Within_Bounds": proportion_within_bounds
+            },
             step=epoch
         )
         plt.close()
