@@ -12,12 +12,47 @@ import sklearn.datasets
 from sklearn.utils import shuffle as util_shuffle
 import scipy
 from tqdm import tqdm
+from scipy.integrate import dblquad
 
 # Dataset iterator
 def inf_train_gen(data, batch_size=200, minimum=0):
-    print(data)
-    if data == "custom_density":
-        scale = 1.
+    if data == "elliptic_paraboloid":
+        scale = 4.0
+        a, b, c = 1, 0.5, 1  # Smaller semi-axes for sharper curvature
+
+        # Define the unnormalized density function for the inverted elliptic paraboloid
+        def unnormalized_density_inverted(x, y):
+            return max(0, (x**2 / a**2 + y**2 / b**2) - 0.5)
+
+        # Recalculate the normalization constant for the inverted density
+        normalization_constant_inverted, _ = dblquad(
+            lambda x, y: unnormalized_density_inverted(x, y),
+            -1, 1,  # x bounds
+            lambda x: -1, lambda x: 1  # y bounds
+        )
+
+        def normalized_density_inverted(x, y):
+            return unnormalized_density_inverted(x, y) / normalization_constant_inverted
+
+        # Sampling using rejection sampling with inverted curvature
+        def sample_from_density_inverted(n_samples):
+            samples = []
+            while len(samples) < n_samples:
+                x_rand = np.random.uniform(-1, 1)
+                y_rand = np.random.uniform(-1, 1)
+                z_rand = np.random.uniform(0, 1)
+                density_val = normalized_density_inverted(x_rand, y_rand)
+                if z_rand < density_val:
+                    samples.append((x_rand, y_rand))
+            return np.array(samples)
+
+        # Generate 10000 samples with inverted curvature
+        samples = sample_from_density_inverted(batch_size) * scale
+
+        return samples.astype("float32"), None
+    
+    elif data == "custom_density":
+        scale = 4.
         # Define the unnormalized density function
         def unnormalized_density(x, y):
             return np.sin(10 * x) * np.cos(10 * y) + np.sin(5 * x * y) + 2.0 + minimum
@@ -102,7 +137,7 @@ def inf_train_gen(data, batch_size=200, minimum=0):
         return data.astype(np.float32), (y > 0.5).astype(np.float32)[:,None]
 
     elif data == "8gaussians":
-        scale = 1.
+        scale = 4.
         centers = [
                    (0, 1), 
                    (-1. / np.sqrt(2), 1. / np.sqrt(2)),
@@ -120,7 +155,7 @@ def inf_train_gen(data, batch_size=200, minimum=0):
         dataset = []
         indexes = []
         for i in range(batch_size):
-            point = np.random.randn(2) * 0.125
+            point = np.random.randn(2) * 0.5
             idx = np.random.randint(8)
             center = centers[idx]
             point[0] += center[0]
@@ -179,7 +214,7 @@ def inf_train_gen(data, batch_size=200, minimum=0):
         return np.stack((x, y), 1)
     
     elif data == 'uniform':
-        scale = 1.
+        scale = 4.
         x = np.random.uniform(-1, 1, batch_size)
         y = np.random.uniform(-1, 1, batch_size)
         return np.stack((x * scale, y * scale), 1), None
@@ -189,7 +224,7 @@ def inf_train_gen(data, batch_size=200, minimum=0):
 
 class Toy_dataset(torch.utils.data.Dataset):
     def __init__(self, name, datanum=1000000, minimum=0, device='cpu'):
-        assert name in ["swissroll", "8gaussians", "moons", "rings", "checkerboard", "2spirals", "uniform", "custom_density"]
+        assert name in ["swissroll", "8gaussians", "moons", "rings", "checkerboard", "2spirals", "uniform", "custom_density", "elliptic_paraboloid"]
         self.datanum =datanum
         self.name = name
         self.datas, _ = inf_train_gen(name, batch_size=datanum)
