@@ -15,12 +15,13 @@ from net import UnclippedDiffusion
 
 
 class ODEFunc(nn.Module):
-    def __init__(self, diffusion):
+    def __init__(self, diffusion, epsilon):
         super().__init__()
         self.diffusion = diffusion
+        self.epsilon = epsilon
         self.nfe = 0
     
-    def estimate_drift_and_divergence(self, t, x, epsilon):
+    def estimate_drift_and_divergence(self, t, x):
         with torch.enable_grad():
             x, log_p = x
             x = x.requires_grad_()
@@ -29,17 +30,16 @@ class ODEFunc(nn.Module):
             drift = self.diffusion.forward_drift(x, t) - 0.5 * self.diffusion.forward_diffusion(t) ** 2 * (-self.diffusion.model(x[:, None, :], batched_t) / self.diffusion.sqrt_one_minus_alphas_cumprod[int(t)]).squeeze()
             divergence = torch.sum(
                 torch.autograd.grad(
-                    torch.sum(drift * epsilon.clone()),
+                    torch.sum(drift * self.epsilon.clone()),
                     x,
                     create_graph=True
-                )[0] * epsilon, dim=(1)
+                )[0] * self.epsilon, dim=(1)
             )
         return drift, divergence
     
     def forward(self, t, x):
         self.nfe = self.nfe + 1
-        epsilon = torch.randn_like(x[0])
-        drift, divergence = self.estimate_drift_and_divergence(t, x, epsilon)
+        drift, divergence = self.estimate_drift_and_divergence(t, x)
         return drift, divergence
 
 
@@ -65,8 +65,10 @@ class ProbabilityFlowODE(UnclippedDiffusion):
             
     
     def probability_ode_sample(self, batch_size, method='euler', atol=1e-2, rtol=1e-2):
-        odefunc = ODEFunc(self)
         noise = torch.randn(batch_size, self.seq_length)
+        epsilon = (torch.randint_like(noise, 2) * 2 - 1).to(self.device)
+        odefunc = ODEFunc(self, epsilon)
+        
         result = odeint(
             odefunc,
             (noise.to(self.device).requires_grad_(), torch.zeros(noise.shape[0]).to(self.device)),
@@ -78,11 +80,12 @@ class ProbabilityFlowODE(UnclippedDiffusion):
         return result[0][-1], odefunc.nfe
     
     def get_likelihood(self, samples, method='euler', atol=1e-2, rtol=1e-2):
-        odefunc = ODEFunc(self)
+        epsilon = (torch.randint_like(samples, 2) * 2 - 1).to(self.device)
+        odefunc = ODEFunc(self, epsilon)
         result = odeint(
             odefunc,
             (samples.to(self.device).requires_grad_(), torch.zeros(samples.shape[0]).to(self.device)),
-            torch.arange(0, self.num_timesteps).flip(0).to(torch.float32).to(self.device),
+            torch.arange(0, self.num_timesteps).to(torch.float32).to(self.device),
             method=method,
             atol=atol, 
             rtol=rtol
@@ -94,3 +97,11 @@ class ProbabilityFlowODE(UnclippedDiffusion):
         log_likelihood = delta_ll + prior_likelihood
         return log_likelihood, prior, odefunc.nfe
 
+
+def get_prior_likelihood(
+    z: torch.FloatTensor, 
+    sigma: float,
+):
+    shape = torch.tensor(z.shape)
+    N = torch.prod(shape[2:])
+    return -N / 2. * np.log(2*np.pi*sigma**2) - torch.sum(z**2, dim=(2,3,4)) / (2 * sigma**2)

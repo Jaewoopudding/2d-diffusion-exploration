@@ -51,7 +51,7 @@ y = torch.linspace(-4, 4, 200, device=device)
 xx, yy = torch.meshgrid(x, y, indexing="ij")  # 'ij' ensures matrix indexing (like numpy)
 
 # Combine grid points into a tensor of shape (N, 2)
-grid_points = torch.stack([xx.flatten(), yy.flatten()], dim=-1)  # Shape: (200*200, 2)
+grid_points = torch.stack([yy.flatten(), xx.flatten()], dim=-1)  # Shape: (200*200, 2)
 
 
 log_likelihood, prior, nfe = diffusion.get_likelihood(grid_points)
