@@ -32,7 +32,7 @@ parser.add_argument('--train_batch_size', type=int, default=1000, help='Batch si
 parser.add_argument('--num_inner_epochs', type=int, default=1, help='Number of inner epochs for training')
 parser.add_argument('--num_batches_per_epoch', type=int, default=1000, help='Number of batches per epoch')
 parser.add_argument('--adv_clip_max', type=float, default=5.0, help='Maximum value for clipping advantages')
-parser.add_argument('--clip_range', type=float, default=1e-4, help='Clipping range for rewards')
+parser.add_argument('--clip_range', type=float, default=1e-4, help='Clipsping range for rewards')
 # parser.add_argument('--gradient_accumulation_steps', type=int, default=16, help='Number of gradient accumulation steps')
 parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Maximum gradient norm for clipping')
 
@@ -100,7 +100,7 @@ for epoch in trange(args.num_epochs):
     )
 
     latents = torch.stack(latents, dim = 1) # (batch_size, num_steps, 1, 2)
-    logprobs = torch.stack(logprobs, dim = 1).unsqueeze(-1) # (batch_size, num_steps-1 , 1)
+    logprobs = torch.stack(logprobs, dim = 1).unsqueeze(-1).detach() # (batch_size, num_steps-1 , 1)
     timesteps, timepairs = diffusion.prepare_ddim_timesteps(args.sampling_timesteps) 
     timesteps = torch.tensor(timesteps[:-1], device=device).repeat(args.num_batches_per_epoch, 1) # (batch_size, num_steps)
     
@@ -181,7 +181,7 @@ for epoch in trange(args.num_epochs):
                 # breakpoint()
                 # breakpoint()
                 noise_preds, x_start = diffusion.model_predictions(
-                    sample["latents"][:, j],
+                    sample["latents"][:, j].detach(),
                     sample["timesteps"][:, j],
                     self_cond,
                     clip_x_start=clip_denoised,
@@ -189,7 +189,7 @@ for epoch in trange(args.num_epochs):
 
                 _, logprob = diffusion.ddim_step_with_logprob(
                     noise_preds, x_start, sample["timesteps"][:, j], 
-                    latent = sample["latents"][:,j], next_latent = sample["next_latents"][:,j], 
+                    latent = sample["latents"][:,j].detach(), next_latent = sample["next_latents"][:,j].detach(), 
                     ddim_sampling_eta = 1.0
                 )
 
@@ -200,6 +200,7 @@ for epoch in trange(args.num_epochs):
                     args.adv_clip_max,
                 )
                 # print("advantages", advantages)
+                
 
                 ratio = torch.exp(logprob - sample["logprobs"][:, j].squeeze(-1))
                 unclipped_loss = -advantages * ratio
