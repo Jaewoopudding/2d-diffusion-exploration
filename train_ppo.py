@@ -22,7 +22,7 @@ tqdm = partial(tqdm.tqdm, dynamic_ncols=True)
 
 # Command-line arguments
 parser = argparse.ArgumentParser(description="Train a Gaussian Diffusion Model")
-parser.add_argument('--device', type=str, default='cuda:7', help='Device to use for training')
+parser.add_argument('--device', type=str, default='cuda:6', help='Device to use for training')
 
 
 ## training
@@ -81,7 +81,7 @@ model = model.to(device)
 diffusion = diffusion.to(device)
 
 
-state_dict = torch.load(f"models/{args.distribution}/save_model.pt")
+state_dict = torch.load(f"models/{args.distribution}/save_model.pt", map_location=device)
 diffusion.load_state_dict(state_dict)
 
 optimizer = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
@@ -119,9 +119,9 @@ for epoch in trange(args.num_epochs):
     wandb.log(
         {
             "rewards_mean": rewards.mean().item(),
-            "epoch": epoch,
             "reward_std": rewards.std().item(),
-        }
+        },
+        step = epoch
     )
         
     # breakpoint()
@@ -239,9 +239,9 @@ for epoch in trange(args.num_epochs):
 
         # print(info)
         info = {k: np.mean(v) for k, v in info.items()}
-        info["epoch"] = epoch
         wandb.log(
             info,
+            step = epoch
         )
         info = defaultdict(list)
 
@@ -269,8 +269,8 @@ for epoch in trange(args.num_epochs):
             {
                 "samples_epoch": wandb.Image(plot_file),
                 "Proportion_Within_Bounds": proportion_within_bounds,
-                "epoch" : epoch
             },
+            step = epoch
         )
         plt.close()
 
@@ -297,7 +297,7 @@ output_image_route = f'images/{args.distribution}/dppo_sampled_images.png'
 plt.savefig(output_image_route, dpi=300)
 print(f"Sampled image plot saved to {output_image_route}")
 wandb.log(
-    {"final_samples": wandb.Image(output_image_route)}
+    {"final_samples": wandb.Image(output_image_route)},
 )
 plt.show()
 
