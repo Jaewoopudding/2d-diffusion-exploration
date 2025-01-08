@@ -15,8 +15,8 @@ from functools import partial
 from collections import defaultdict
 
 from net import MLP, UnclippedDiffusion
-from reward_fn import GMM
-
+from rewardfns.reward_fn import GMM
+import rewardfns.reward_fn as reward_fn
 
 tqdm = partial(tqdm.tqdm, dynamic_ncols=True)
 
@@ -36,7 +36,9 @@ parser.add_argument('--clip_range', type=float, default=1e-4, help='Clipsping ra
 # parser.add_argument('--gradient_accumulation_steps', type=int, default=16, help='Number of gradient accumulation steps')
 parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Maximum gradient norm for clipping')
 
-parser.add_argument('--reward_fn', type=str, default='gmm', help='Reward model to use for training')
+
+parser.add_argument('--reward_fn_configs', type=str, default="rewardfns/configs/GMM/gmm_covariance1.0_center1_00_uniform.pkl", help='Reward model configurations path')
+
 
 ## sampling
 parser.add_argument('--sample_batch_size', type=int, default=1, help='Batch size for sampling')
@@ -61,10 +63,12 @@ os.makedirs(model_dir, exist_ok=True)
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device = args.device
 
+
+logging_nm = args.reward_fn_configs.split("/")[-1].split(".")[0]
 wandb.init(
     entity='gda-for-orl',
     project='toy-explore',
-    name=f"{args.distribution}_{args.reward_fn}",
+    name=f"{args.distribution}_{logging_nm}",
     config=vars(args)
 )
 
@@ -87,7 +91,11 @@ diffusion.load_state_dict(state_dict)
 optimizer = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
 
 
-rewardfn = GMM(n_components=3, covariance_type='full', random_state=42, rewardfn_path = f"rewardfns/{args.reward_fn}.pkl")
+reward_fn_name = args.reward_fn_configs.split("/")[-2]
+rewardfn = getattr(reward_fn, reward_fn_name)
+reward_fn = rewardfn(model_path = args.reward_fn_configs,
+                     load_model = True,)
+# rewardfn = GMM(n_components=3, covariance_type='full', random_state=42, rewardfn_path = f"rewardfns/{args.reward_fn}.pkl")
 
 global_step = 0
 # Training loop
@@ -105,7 +113,8 @@ for epoch in trange(args.num_epochs):
     timesteps = torch.tensor(timesteps[:-1], device=device).repeat(args.num_batches_per_epoch, 1) # (batch_size, num_steps)
     
     ### put rewards
-    rewards = rewardfn(images) # (batch_size,)
+    # breakpoint()
+    rewards = reward_fn(images.squeeze(1).detach()) # (batch_size,)
     
 
     samples = {
@@ -300,7 +309,6 @@ wandb.log(
     {"final_samples": wandb.Image(output_image_route)},
 )
 plt.show()
-
 
 
     
