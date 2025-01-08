@@ -314,3 +314,23 @@ class UnclippedDiffusion(GaussianDiffusion1D):
         img = self.unnormalize(img)    
         
         return latents, logprobs, img
+    
+    def get_kld(self, pred_noise, prior_pred_noise, x_start, prior_x_start, timestep, ddim_sampling_eta = 1.0):
+        times, time_pairs = self.prepare_ddim_timesteps(self.sampling_timesteps)
+        ts = timestep.tolist()
+        batch_timepairs = [time_pairs[self.sampling_timesteps - (i+1)] for i in ts]
+        batch_timepairs = torch.tensor(batch_timepairs)
+        time, time_next = batch_timepairs[:, 0], batch_timepairs[:, 1]
+        
+        assert time.detach().cpu().sum() == timestep.detach().cpu().sum() 
+
+        alpha = self.alphas_cumprod[time]
+        alpha_next = self.alphas_cumprod[time_next]
+        sigma = ddim_sampling_eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+        c = (1 - alpha_next - sigma ** 2).sqrt()
+
+        noise = torch.randn_like(pred_noise)
+        next_sample_mean       = alpha_next.sqrt().unsqueeze(1).unsqueeze(2) * x_start       + c.unsqueeze(1).unsqueeze(2) * pred_noise
+        prior_next_sample_mean = alpha_next.sqrt().unsqueeze(1).unsqueeze(2) * prior_x_start + c.unsqueeze(1).unsqueeze(2) * prior_pred_noise
+        kld = (next_sample_mean - prior_next_sample_mean.detach()) ** 2 / (2 * sigma ** 2)
+        return kld
