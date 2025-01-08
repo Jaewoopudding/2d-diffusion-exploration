@@ -42,7 +42,7 @@ parser.add_argument('--reward_fn', type=str, default='gmm', help='Reward model t
 ## sampling
 parser.add_argument('--sample_batch_size', type=int, default=1, help='Batch size for sampling')
 parser.add_argument('--sampling_timesteps', type=int, default=100, help='Number of timesteps for sampling')
-parser.add_argument('--kl_divergence_coef', type=float, default=0.0, help='Coefficient for KL divergence regularizer. Set 0 for unconstrained tuning.')
+parser.add_argument('--kl_divergence_coef', type=float, default=0.1, help='Coefficient for KL divergence regularizer. Set 0 for unconstrained tuning.')
 
 
 ## validation
@@ -82,14 +82,12 @@ diffusion = UnclippedDiffusion(
 model = model.to(device)
 diffusion = diffusion.to(device)
 
+state_dict = torch.load(f"models/{args.distribution}/save_model.pt", map_location=device)
+diffusion.load_state_dict(state_dict)
 
 if args.kl_divergence_coef:
     prior_model = copy.deepcopy(model)
     prior_diffusion = copy.deepcopy(diffusion)
-    
-
-state_dict = torch.load(f"models/{args.distribution}/save_model.pt", map_location=device)
-diffusion.load_state_dict(state_dict)
 
 optimizer = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
 
@@ -210,7 +208,7 @@ for epoch in trange(args.num_epochs):
                 clipped_loss = -advantages * torch.clamp(
                     ratio, 1 - args.clip_range, 1 + args.clip_range
                 )
-                loss = torch.mean(torch.max(unclipped_loss, clipped_loss))
+                ppo_loss = torch.mean(torch.max(unclipped_loss, clipped_loss))
                 
                 if args.kl_divergence_coef:
                     prior_noise_pred, prior_x_start = prior_diffusion.model_predictions(
@@ -219,7 +217,6 @@ for epoch in trange(args.num_epochs):
                         self_cond,
                         clip_x_start=clip_denoised,
                     ) 
-                    
                     kl_divergence = diffusion.get_kld(
                         noise_preds, 
                         prior_noise_pred,
@@ -227,11 +224,14 @@ for epoch in trange(args.num_epochs):
                         prior_x_start,
                         sample["timesteps"][:, j], 
                     )
-                    loss = loss - args.kl_divergence_coef * kl_divergence
+                    kl_loss = args.kl_divergence_coef * kl_divergence
+                    loss = ppo_loss + kl_loss
                 loss_accum += loss
 
 
                 info["ratio"].append(ratio.mean().item())   
+                info["ppo_loss"].append(ppo_loss.item())
+                info["kl_divergence"].append(kl_loss.item())
                 info["loss"].append(loss.item())
                 info["approx_kl"].append(
                     0.5

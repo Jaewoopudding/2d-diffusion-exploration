@@ -328,8 +328,7 @@ class UnclippedDiffusion(GaussianDiffusion1D):
         alpha_next = self.alphas_cumprod[time_next]
         sigma = ddim_sampling_eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
         c = (1 - alpha_next - sigma ** 2).sqrt()
-
-        noise = torch.randn_like(pred_noise)
+        
         next_sample_mean       = alpha_next.sqrt().unsqueeze(1).unsqueeze(2) * x_start       + c.unsqueeze(1).unsqueeze(2) * pred_noise
         prior_next_sample_mean = alpha_next.sqrt().unsqueeze(1).unsqueeze(2) * prior_x_start + c.unsqueeze(1).unsqueeze(2) * prior_pred_noise
         kld = ((next_sample_mean - prior_next_sample_mean.detach()).squeeze() ** 2 / (2 * sigma[time] ** 2).unsqueeze(1)).mean()
