@@ -1,5 +1,6 @@
 import argparse
 import os
+import copy
 
 import numpy as np
 import torch
@@ -43,6 +44,7 @@ parser.add_argument('--reward_fn_configs', type=str, default="rewardfns/configs/
 ## sampling
 parser.add_argument('--sample_batch_size', type=int, default=1, help='Batch size for sampling')
 parser.add_argument('--sampling_timesteps', type=int, default=100, help='Number of timesteps for sampling')
+parser.add_argument('--kl_divergence_coef', type=float, default=0.0, help='Coefficient for KL divergence regularizer. Set 0 for unconstrained tuning.')
 
 
 ## validation
@@ -68,7 +70,7 @@ logging_nm = args.reward_fn_configs.split("/")[-1].split(".")[0]
 wandb.init(
     entity='gda-for-orl',
     project='toy-explore',
-    name=f"{args.distribution}_{logging_nm}",
+    name=f"{args.distribution}_{logging_nm}-kl:{args.kl_divergence_coef}",
     config=vars(args)
 )
 
@@ -84,6 +86,11 @@ diffusion = UnclippedDiffusion(
 model = model.to(device)
 diffusion = diffusion.to(device)
 
+
+if args.kl_divergence_coef:
+    prior_model = copy.deepcopy(model)
+    prior_diffusion = copy.deepcopy(diffusion)
+    
 
 state_dict = torch.load(f"models/{args.distribution}/save_model.pt", map_location=device)
 diffusion.load_state_dict(state_dict)
@@ -182,13 +189,9 @@ for epoch in trange(args.num_epochs):
             for j in tqdm(
                 range(args.sampling_timesteps - 1),
             ):
-                # print(sample["latents"][:, j].shape) # torch.Size([16, 1, 2])
-                # print(sample["timesteps"][:, j].shape) # torch.Size([16])
-                
                 self_cond = None
                 clip_denoised = False
-                # breakpoint()
-                # breakpoint()
+                
                 noise_preds, x_start = diffusion.model_predictions(
                     sample["latents"][:, j].detach(),
                     sample["timesteps"][:, j],
@@ -217,6 +220,23 @@ for epoch in trange(args.num_epochs):
                     ratio, 1 - args.clip_range, 1 + args.clip_range
                 )
                 loss = torch.mean(torch.max(unclipped_loss, clipped_loss))
+                
+                if args.kl_divergence_coef:
+                    prior_noise_pred, prior_x_start = prior_diffusion.model_predictions(
+                        sample["latents"][:, j].detach(),
+                        sample["timesteps"][:, j],
+                        self_cond,
+                        clip_x_start=clip_denoised,
+                    ) 
+                    
+                    kl_divergence = diffusion.get_kld(
+                        noise_preds, 
+                        prior_noise_pred,
+                        x_start, 
+                        prior_x_start,
+                        sample["timesteps"][:, j], 
+                    )
+                    loss = loss - args.kl_divergence_coef * kl_divergence
                 loss_accum += loss
 
 
