@@ -66,7 +66,7 @@ device = args.device
 wandb.init(
     entity='gda-for-orl',
     project='toy-explore',
-    name=f"{args.distribution}_{args.reward_fn}",
+    name=f"{args.distribution}_{args.reward_fn}-kl:{args.kl_divergence_coef}",
     config=vars(args)
 )
 
@@ -220,7 +220,7 @@ for epoch in trange(args.num_epochs):
                         clip_x_start=clip_denoised,
                     ) 
                     
-                    kl_divergence = diffusion.get_kl_divergence(
+                    kl_divergence = diffusion.get_kld(
                         noise_preds, 
                         prior_noise_pred,
                         x_start, 
