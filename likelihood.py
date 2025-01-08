@@ -32,6 +32,7 @@ diffusion = ProbabilityFlowODE(
     device=device,
     seq_length=2,
     timesteps=100,
+    sampling_timesteps=50,
     auto_normalize=False
 )
 

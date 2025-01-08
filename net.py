@@ -160,13 +160,28 @@ class UnclippedDiffusion(GaussianDiffusion1D):
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
         return pred_img, x_start
     
-    @torch.no_grad()
-    def ddim_sample(self, shape, clip_denoised = False):
-        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+    def prepare_ddim_timesteps(self, sampling_timesteps):
 
-        times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        times = torch.linspace(-1, self.num_timesteps - 1, steps=sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+
+        return times, time_pairs
+
+    def sample(self, batch_size=16, sampling_timesteps = None):
+        self.sampling_timesteps = sampling_timesteps if sampling_timesteps is not None else self.num_timesteps
+        assert self.sampling_timesteps <= self.num_timesteps, 'sampling_timesteps must be smaller than num_timesteps'
+        
+        seq_length, channels = self.seq_length, self.channels
+        sample_fn = self.p_sample_loop if self.sampling_timesteps==self.num_timesteps else self.ddim_sample
+        return sample_fn((batch_size, channels, seq_length))
+
+    @torch.no_grad()
+    def ddim_sample(self, shape, clip_denoised = False, ddim_sampling_eta = 1.0):
+        self.ddim_sampling_eta = ddim_sampling_eta
+        batch, device, total_timesteps, sampling_timesteps, objective = shape[0], self.betas.device, self.num_timesteps, self.sampling_timesteps, self.objective
+
+        times, time_pairs = self.prepare_ddim_timesteps(sampling_timesteps)
 
         img = torch.randn(shape, device = device)
 
@@ -174,6 +189,91 @@ class UnclippedDiffusion(GaussianDiffusion1D):
 
         for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
             time_cond = torch.full((batch,), time, device=device, dtype=torch.long)
+            self_cond = x_start if self.self_condition else None
+            pred_noise, x_start, *_ = self.model_predictions(img, time_cond, self_cond, clip_x_start = clip_denoised)
+
+
+            if time_next < 0:
+                img = x_start
+                continue
+
+            alpha = self.alphas_cumprod[time]
+            alpha_next = self.alphas_cumprod[time_next]
+
+            sigma = ddim_sampling_eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            c = (1 - alpha_next - sigma ** 2).sqrt()
+
+            noise = torch.randn_like(img)
+
+            img = x_start * alpha_next.sqrt() + \
+                  c * pred_noise + \
+                  sigma * noise
+
+        img = self.unnormalize(img)
+        return img
+    
+
+    def ddim_step_with_logprob(self, pred_noise, x_start, timestep, latent, next_latent, ddim_sampling_eta = 1.0):
+
+        
+        times, time_pairs = self.prepare_ddim_timesteps(self.sampling_timesteps)
+
+        ts = timestep.tolist()
+
+        batch_timepairs = [time_pairs[self.sampling_timesteps - (i+1)] for i in ts]
+        batch_timepairs = torch.tensor(batch_timepairs)
+        
+
+        time, time_next = batch_timepairs[:, 0], batch_timepairs[:, 1]
+        
+        assert time.detach().cpu().sum() == timestep.detach().cpu().sum() 
+
+        alpha = self.alphas_cumprod[time]
+        alpha_next = self.alphas_cumprod[time_next]
+
+        sigma = ddim_sampling_eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+        c = (1 - alpha_next - sigma ** 2).sqrt()
+
+        noise = torch.randn_like(pred_noise)
+
+        next_sample_mean = alpha_next.sqrt().unsqueeze(1).unsqueeze(2) * x_start + c.unsqueeze(1).unsqueeze(2) * pred_noise
+
+        if next_latent is None:
+            next_latent = next_sample_mean + sigma.unsqueeze(1).unsqueeze(2) * noise 
+        
+
+        logprob = (
+            -((next_latent.detach() - next_sample_mean)**2) / (2 * (sigma**2).unsqueeze(1).unsqueeze(2))
+            - torch.log(sigma.unsqueeze(1).unsqueeze(2))
+            - torch.log(torch.sqrt(2 * torch.as_tensor(np.pi)))
+        )
+
+
+        logprob = logprob.mean(dim=(1,2))
+
+
+        return next_latent, logprob
+
+
+
+    def ddim_sample_with_logprob(self, batch_size=16, clip_denoised = False, sampling_timesteps = 100, ddim_sampling_eta = 1.0):
+        shape = (batch_size, self.channels, self.seq_length)
+        eta = ddim_sampling_eta
+
+        device, total_timesteps, objective = self.betas.device, self.num_timesteps, self.objective
+
+        times, time_pairs = self.prepare_ddim_timesteps(sampling_timesteps)
+
+        img = torch.randn(shape, device = device)
+
+        x_start = None
+        
+
+        latents = [img]
+        logprobs = []
+
+        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
+            time_cond = torch.full((batch_size,), time, device=device, dtype=torch.long)
             self_cond = x_start if self.self_condition else None
             pred_noise, x_start, *_ = self.model_predictions(img, time_cond, self_cond, clip_x_start = clip_denoised)
 
@@ -188,10 +288,29 @@ class UnclippedDiffusion(GaussianDiffusion1D):
             c = (1 - alpha_next - sigma ** 2).sqrt()
 
             noise = torch.randn_like(img)
+            
+            next_sample_mean = alpha_next.sqrt() * x_start + c * pred_noise
 
-            img = x_start * alpha_next.sqrt() + \
-                  c * pred_noise + \
-                  sigma * noise
+            img = next_sample_mean + sigma * noise
 
-        img = self.unnormalize(img)
-        return img
+            logprob = (
+                -((img.detach() - next_sample_mean)**2) / (2 * (sigma**2))
+                - torch.log(sigma)
+                - torch.log(torch.sqrt(2 * torch.as_tensor(np.pi)))
+            )
+
+
+            logprob = logprob.mean(dim=(1,2))
+
+            latents.append(img)
+            logprobs.append(logprob)
+
+            # std_dev_t = sigma
+            # pred_sample_direction = c * pred_noise
+            # pred_original_sample = x_start
+            # alpha_prod_t_prev = alpha_next
+            # prev_sample_mean = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
+            # prev_sample = sigma * noise + prev_sample_mean
+        img = self.unnormalize(img)    
+        
+        return latents, logprobs, img

@@ -40,7 +40,7 @@ model = MLP()
 diffusion = UnclippedDiffusion(
     model=model,
     seq_length=2,
-    timesteps=100,
+    timesteps=500,
     auto_normalize=False,
 )
 
