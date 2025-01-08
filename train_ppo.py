@@ -64,7 +64,7 @@ device = args.device
 wandb.init(
     entity='gda-for-orl',
     project='toy-explore',
-    name=args.distribution,
+    name=f"{args.distribution}_{args.reward_fn}",
     config=vars(args)
 )
 
