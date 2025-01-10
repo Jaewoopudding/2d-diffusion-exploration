@@ -25,7 +25,6 @@ class ODEFunc(nn.Module):
         with torch.enable_grad():
             x, log_p = x
             x = x.requires_grad_()
-            print(t)
             batched_t = t.expand(x.shape[0]).requires_grad_()
             drift = self.diffusion.forward_drift(x, t) - 0.5 * self.diffusion.forward_diffusion(t) ** 2 * (-self.diffusion.model(x[:, None, :], batched_t) / self.diffusion.sqrt_one_minus_alphas_cumprod[int(t)]).squeeze()
             divergence = torch.sum(
@@ -62,7 +61,6 @@ class ProbabilityFlowODE(UnclippedDiffusion):
     
     def forward_diffusion(self, t):
         return self.betas[int(t)].sqrt()
-            
     
     def probability_ode_sample(self, batch_size, method='euler', atol=1e-2, rtol=1e-2):
         noise = torch.randn(batch_size, self.seq_length)
@@ -79,13 +77,13 @@ class ProbabilityFlowODE(UnclippedDiffusion):
         )
         return result[0][-1], odefunc.nfe
     
-    def get_likelihood(self, samples, method='euler', atol=1e-2, rtol=1e-2):
+    def get_likelihood(self, samples, timestep=None, method='euler', atol=1e-2, rtol=1e-2):
         epsilon = (torch.randint_like(samples, 2) * 2 - 1).to(self.device)
         odefunc = ODEFunc(self, epsilon)
         result = odeint(
             odefunc,
             (samples.to(self.device).requires_grad_(), torch.zeros(samples.shape[0]).to(self.device)),
-            torch.arange(0, self.num_timesteps).to(torch.float32).to(self.device),
+            torch.arange(0 if timestep is None else timestep, self.num_timesteps).to(torch.float32).to(self.device),
             method=method,
             atol=atol, 
             rtol=rtol

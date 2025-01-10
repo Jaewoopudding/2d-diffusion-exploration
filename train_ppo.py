@@ -18,12 +18,14 @@ from collections import defaultdict
 from net import MLP, UnclippedDiffusion
 from rewardfns.reward_fn import GMM
 import rewardfns.reward_fn as reward_fn
+from probability_flow_ode import ProbabilityFlowODE
+from intrinsic_rewards import intrinsic_reward_mapping
 
 tqdm = partial(tqdm.tqdm, dynamic_ncols=True)
 
 # Command-line arguments
 parser = argparse.ArgumentParser(description="Train a Gaussian Diffusion Model")
-parser.add_argument('--device', type=str, default='cuda:6', help='Device to use for training')
+parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for training')
 
 
 ## training
@@ -37,14 +39,15 @@ parser.add_argument('--clip_range', type=float, default=1e-4, help='Clipsping ra
 # parser.add_argument('--gradient_accumulation_steps', type=int, default=16, help='Number of gradient accumulation steps')
 parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Maximum gradient norm for clipping')
 
-
+parser.add_argument('--intrinsic_reward', type=str, default="differentiable_pseudo_count", help='Class of intrinsic reward')
+parser.add_argument('--beta', type=float, default=0.1,  help='Coefficient for the intrinsic reward')
 parser.add_argument('--reward_fn_configs', type=str, default="rewardfns/configs/GMM/gmm_covariance1.0_center1_00_uniform.pkl", help='Reward model configurations path')
 
 
 ## sampling
 parser.add_argument('--sample_batch_size', type=int, default=1, help='Batch size for sampling')
 parser.add_argument('--sampling_timesteps', type=int, default=100, help='Number of timesteps for sampling')
-parser.add_argument('--kl_divergence_coef', type=float, default=0.1, help='Coefficient for KL divergence regularizer. Set 0 for unconstrained tuning.')
+parser.add_argument('--kl_divergence_coef', type=float, default=0.01, help='Coefficient for KL divergence regularizer. Set 0 for unconstrained tuning.')
 
 
 ## validation
@@ -76,8 +79,9 @@ wandb.init(
 
 model = MLP()
 
-diffusion = UnclippedDiffusion(
+diffusion = ProbabilityFlowODE(
     model=model,
+    device=args.device,
     seq_length=2,
     timesteps=100,
     auto_normalize=False,
@@ -86,7 +90,7 @@ diffusion = UnclippedDiffusion(
 model = model.to(device)
 diffusion = diffusion.to(device)
 
-state_dict = torch.load(f"models/{args.distribution}/save_model.pt", map_location=device)
+state_dict = torch.load(f"models/{args.distribution}/save_model.pt", map_location=device, weights_only=True)
 diffusion.load_state_dict(state_dict)
 
 if args.kl_divergence_coef:
@@ -95,6 +99,8 @@ if args.kl_divergence_coef:
 
 optimizer = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
 
+assert args.intrinsic_reward in ['none', 'differentiable_pseudo_count', 'differentiable_last_pseudo_count', 'non_differentiable_pseudo_count', 'state_entropy']
+intrinsic_reward_fn = intrinsic_reward_mapping.get(args.intrinsic_reward, lambda: None)(diffusion)
 
 reward_fn_name = args.reward_fn_configs.split("/")[-2]
 rewardfn = getattr(reward_fn, reward_fn_name)
@@ -105,8 +111,6 @@ reward_fn = rewardfn(model_path = args.reward_fn_configs,
 global_step = 0
 # Training loop
 for epoch in trange(args.num_epochs):
-
-
     latents, logprobs, images = diffusion.ddim_sample_with_logprob(
         batch_size=args.num_batches_per_epoch,
         sampling_timesteps=args.sampling_timesteps,
@@ -116,7 +120,6 @@ for epoch in trange(args.num_epochs):
     logprobs = torch.stack(logprobs, dim = 1).unsqueeze(-1).detach() # (batch_size, num_steps-1 , 1)
     timesteps, timepairs = diffusion.prepare_ddim_timesteps(args.sampling_timesteps) 
     timesteps = torch.tensor(timesteps[:-1], device=device).repeat(args.num_batches_per_epoch, 1) # (batch_size, num_steps)
-    
     ### put rewards
     # breakpoint()
     rewards = reward_fn(images.squeeze(1).detach()) # (batch_size,)
@@ -138,15 +141,24 @@ for epoch in trange(args.num_epochs):
         step = epoch
     )
         
-    # breakpoint()
     advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-4)
     samples["advantages"] = advantages
 
-    # breakpoint()
-
+    if args.intrinsic_reward == "differentiable_pseudo_count":
+        intrinsic_rewards = []
+        for timestep in trange(args.sampling_timesteps):
+            intrinsic_reward = intrinsic_reward_fn(latents[:, timestep].squeeze(), timesteps[0][timestep], cumulated_count=(epoch + 1) * args.train_batch_size)
+            intrinsic_rewards.append(intrinsic_reward)
+        intrinsic_rewards = torch.stack(intrinsic_rewards, dim=1)
+        samples['intrinsic_rewards'] = intrinsic_rewards
+    elif args.intrinsic_reward in ["differentiable_last_pseudo_count", "non_differentiable_pseudo_count", "state_entropy"]:
+        intrinsic_rewards = []
+        intrinsic_reward = intrinsic_reward_fn(latents[:, args.sampling_timesteps - 1].squeeze(), 0, cumulated_count=(epoch + 1) * args.train_batch_size)
+        samples['intrinsic_rewards'] = intrinsic_reward
+    else:
+        raise AssertionError
+    
     for inner_epoch in range(args.num_inner_epochs):
-
-        
         perm = torch.randperm(args.num_batches_per_epoch, device=device)
         samples = {k: v[perm] for k, v in samples.items()}
 
@@ -203,14 +215,15 @@ for epoch in trange(args.num_epochs):
                     ddim_sampling_eta = 1.0
                 )
 
-
                 advantages = torch.clamp(
                     sample["advantages"],
                     -args.adv_clip_max,
                     args.adv_clip_max,
                 )
-                # print("advantages", advantages)
                 
+                if args.intrinsic_reward in ["non_differentiable_pseudo_count", 'state_entropy']:
+                    advantages += args.beta * samples["intrinsic_rewards"]
+                    breakpoint()
 
                 ratio = torch.exp(logprob - sample["logprobs"][:, j].squeeze(-1))
                 unclipped_loss = -advantages * ratio
@@ -235,9 +248,20 @@ for epoch in trange(args.num_epochs):
                     )
                     kl_loss = args.kl_divergence_coef * kl_divergence
                     loss = ppo_loss + kl_loss
+                else:
+                    loss = ppo_loss
+
+                if args.intrinsic_reward == "differentiable_pseudo_count":
+                    intrinsic_reward = samples["intrinsic_rewards"][:, j].mean()
+                    loss = loss - args.beta * intrinsic_reward
+                    info["intrinsic_reward"].append(intrinsic_reward.item())
+                elif args.intrinsic_reward == "differentiable_last_pseudo_count":
+                    intrinsic_reward = samples["intrinsic_rewards"].mean()
+                    loss = loss - args.beta * intrinsic_reward
+                    info["intrinsic_reward"].append(intrinsic_reward.item())
+                    
                 loss_accum += loss
-
-
+                    
                 info["ratio"].append(ratio.mean().item())   
                 info["ppo_loss"].append(ppo_loss.item())
                 info["kl_divergence"].append(kl_loss.item())
@@ -260,7 +284,6 @@ for epoch in trange(args.num_epochs):
             # if (i+1) % args.gradient_accumulation_steps == 0:
 
         loss_accum = loss_accum / args.sampling_timesteps
-
         loss_accum.backward()
         torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), args.max_grad_norm)
         optimizer.step()
