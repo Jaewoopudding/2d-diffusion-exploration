@@ -20,7 +20,8 @@ class DifferentiablePseudoCountReward(IntrinsicRewardBase):
         log_likelihood, _, _ = self.diffusion.get_likelihood(sample, timestep)
         assert log_likelihood.requires_grad
         predictive_gain = log_likelihood - log_likelihood.detach()
-        return torch.sqrt(torch.exp((torch.zeros(1).to(self.diffusion.device), predictive_gain) * self.decay_coef / cumulated_count ** -0.5) - 1)
+        breakpoint()
+        return torch.sqrt(torch.exp(predictive_gain * self.decay_coef / cumulated_count ** -0.5) - 1)
         
         
 class NonDifferentiablePseudoCountReward(IntrinsicRewardBase):
