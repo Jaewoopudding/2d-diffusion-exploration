@@ -39,9 +39,9 @@ parser.add_argument('--clip_range', type=float, default=1e-4, help='Clipsping ra
 # parser.add_argument('--gradient_accumulation_steps', type=int, default=16, help='Number of gradient accumulation steps')
 parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Maximum gradient norm for clipping')
 
-parser.add_argument('--intrinsic_reward', type=str, default="differentiable_pseudo_count", help='Class of intrinsic reward')
+parser.add_argument('--intrinsic_reward', type=str, default="rnd", help='Class of intrinsic reward')
 parser.add_argument('--intrinsic_reward_normalization', type=str, default="none", help='Normalization of intrinsic reward')
-parser.add_argument('--beta', type=float, default=0.1,  help='Coefficient for the intrinsic reward')
+parser.add_argument('--beta', type=float, default=0.01,  help='Coefficient for the intrinsic reward')
 parser.add_argument('--reward_fn_configs', type=str, default="rewardfns/configs/GMM/gmm_covariance1.0_center1_00_uniform.pkl", help='Reward model configurations path')
 
 
@@ -59,7 +59,7 @@ parser.add_argument('--datanum', type=int, default=5000, help='Number of data po
 args = parser.parse_args()
 
 assert not ((args.intrinsic_reward_normalization == 'none') and (args.intrinsic_reward_normalization != 'none'))
-assert args.intrinsic_reward in ['none', 'differentiable_pseudo_count', 'differentiable_last_pseudo_count', 'non_differentiable_pseudo_count', 'state_entropy']
+assert args.intrinsic_reward in ['none', 'differentiable_pseudo_count', 'differentiable_last_pseudo_count', 'non_differentiable_pseudo_count', 'state_entropy', 'rnd']
 
 image_dir = f"images/{args.distribution}"
 model_dir = f"models/{args.distribution}"
@@ -75,7 +75,7 @@ device = args.device
 logging_nm = args.reward_fn_configs.split("/")[-1].split(".")[0]
 wandb.init(
     entity='gda-for-orl',
-    project='toy-explore',
+    project='toy-explore-rnd',
     name=f"{args.distribution}_{logging_nm}-kl:{args.kl_divergence_coef}-beta:{args.beta}-ir_norm:{args.intrinsic_reward_normalization}-ir:{args.intrinsic_reward}",
     config=vars(args)
 )
@@ -103,7 +103,18 @@ if args.kl_divergence_coef:
 optimizer = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
 
 
-intrinsic_reward_fn = intrinsic_reward_mapping.get(args.intrinsic_reward, lambda: None)(diffusion)
+if args.intrinsic_reward == "rnd":
+    intrinsic_reward_fn = intrinsic_reward_mapping.get(args.intrinsic_reward, lambda: None)(args.device)
+    rnd_optimizer = torch.optim.Adam(intrinsic_reward_fn.predictor_network.parameters(), 
+                                     lr=1e-4,
+                                     betas = (0.9, 0.999),
+                                     weight_decay = 1e-4,
+                                     eps = 1e-8,
+                                     )
+    
+else:
+    intrinsic_reward_fn = intrinsic_reward_mapping.get(args.intrinsic_reward, lambda: None)(diffusion)
+
 
 reward_fn_name = args.reward_fn_configs.split("/")[-2]
 rewardfn = getattr(reward_fn, reward_fn_name)
@@ -160,8 +171,15 @@ for epoch in trange(args.num_epochs):
         intrinsic_rewards = []
         intrinsic_reward = intrinsic_reward_fn(latents[:, args.sampling_timesteps - 1].squeeze(), 0, cumulated_count=(epoch + 1) * args.train_batch_size).clip(-10, 10)
         samples['intrinsic_rewards'] = intrinsic_reward
-    else:
-        raise AssertionError
+    elif args.intrinsic_reward == "rnd":
+        intrinsic_reward_fn.predictor_network.eval()
+        intrinsic_reward = intrinsic_reward_fn.compute_reward(latents[:, 1:]).detach()
+        samples['intrinsic_rewards'] = intrinsic_reward.sum(dim=tuple(range(1,intrinsic_reward.ndim)))
+        assert not torch.isnan(samples['intrinsic_rewards']).any()
+    # elif args.intrinsic_reward == "none":
+    #     pass
+
+    #     raise AssertionError
 
     if args.intrinsic_reward_normalization == 'standard':
         samples['intrinsic_rewards'] = (intrinsic_reward - intrinsic_reward.mean()) / (intrinsic_reward.std() + 1e-4)
@@ -233,7 +251,7 @@ for epoch in trange(args.num_epochs):
                     args.adv_clip_max,
                 )
                 
-                if args.intrinsic_reward in ["non_differentiable_pseudo_count", 'state_entropy']:
+                if args.intrinsic_reward in ["non_differentiable_pseudo_count", 'state_entropy', 'rnd']:
                     advantages += args.beta * samples["intrinsic_rewards"].detach()
                     info["intrinsic_reward"].append(args.beta * samples["intrinsic_rewards"].detach().mean().item())
 
@@ -271,6 +289,7 @@ for epoch in trange(args.num_epochs):
                     intrinsic_reward = samples["intrinsic_rewards"].mean()
                     loss = loss - args.beta * intrinsic_reward
                     info["intrinsic_reward"].append(intrinsic_reward.item())
+
                     
                 loss_accum += loss
                     
@@ -290,6 +309,9 @@ for epoch in trange(args.num_epochs):
                     ).item()
                 )
 
+
+
+                        
             # loss_accum = loss_accum / args.gradient_accumulation_steps
             # loss_accum.backward()
 
@@ -300,7 +322,13 @@ for epoch in trange(args.num_epochs):
         torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), args.max_grad_norm)
         optimizer.step()    
 
-
+        if args.intrinsic_reward == "rnd":
+            intrinsic_reward_fn.predictor_network.train()
+            rnd_optimizer.zero_grad()
+            rnd_loss = intrinsic_reward_fn.compute_loss(sample["next_latents"].clone().detach().requires_grad_())
+            rnd_loss.backward()
+            rnd_optimizer.step()
+            info["rnd_loss"].append(rnd_loss.item())
 
 
         # print(info)
@@ -311,7 +339,7 @@ for epoch in trange(args.num_epochs):
         )
         info = defaultdict(list)
 
-
+        
     
     # Sample and log images after each epoch
     if ((epoch +1) % 200) == 0: 
