@@ -1,6 +1,7 @@
 import argparse
 import os
 import copy
+import random
 
 import numpy as np
 import torch
@@ -26,6 +27,7 @@ tqdm = partial(tqdm.tqdm, dynamic_ncols=True)
 # Command-line arguments
 parser = argparse.ArgumentParser(description="Train a Gaussian Diffusion Model")
 parser.add_argument('--device', type=str, default='cuda:4', help='Device to use for training')
+parser.add_argument('--seed', type=int, default=0, help='Random seed for training')
 
 
 ## training
@@ -41,6 +43,7 @@ parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Maximum gr
 
 parser.add_argument('--intrinsic_reward', type=str, default="rnd", help='Class of intrinsic reward')
 parser.add_argument('--intrinsic_reward_normalization', type=str, default="none", help='Normalization of intrinsic reward')
+parser.add_argument('--intrinsic_reward_bound', type=float, default=10.0, help='Maximum absolute value of intrinsic reward')
 parser.add_argument('--beta', type=float, default=0.01,  help='Coefficient for the intrinsic reward')
 parser.add_argument('--reward_fn_configs', type=str, default="rewardfns/configs/GMM/gmm_covariance1.0_center1_00_uniform.pkl", help='Reward model configurations path')
 
@@ -70,6 +73,19 @@ os.makedirs(model_dir, exist_ok=True)
 # Device setup
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device = args.device
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+# 시드 값 설정
+set_seed(args.seed)
 
 
 logging_nm = args.reward_fn_configs.split("/")[-1].split(".")[0]
@@ -165,11 +181,11 @@ for epoch in trange(args.num_epochs):
         for timestep in trange(args.sampling_timesteps):
             intrinsic_reward = intrinsic_reward_fn(latents[:, timestep].squeeze(), timesteps[0][timestep], cumulated_count=(epoch + 1) * args.train_batch_size)
             intrinsic_rewards.append(intrinsic_reward)
-        intrinsic_rewards = torch.stack(intrinsic_rewards, dim=1).clip(-10, 10)
+        intrinsic_rewards = torch.stack(intrinsic_rewards, dim=1).clip(-args.intrinsic_reward_bound, args.intrinsic_reward_bound)
         samples['intrinsic_rewards'] = intrinsic_rewards
     elif args.intrinsic_reward in ["differentiable_last_pseudo_count", "non_differentiable_pseudo_count", "state_entropy"]:
         intrinsic_rewards = []
-        intrinsic_reward = intrinsic_reward_fn(latents[:, args.sampling_timesteps - 1].squeeze(), 0, cumulated_count=(epoch + 1) * args.train_batch_size).clip(-10, 10)
+        intrinsic_reward = intrinsic_reward_fn(latents[:, args.sampling_timesteps - 1].squeeze(), 0, cumulated_count=(epoch + 1) * args.train_batch_size).clip(-args.intrinsic_reward_bound, args.intrinsic_reward_bound)
         samples['intrinsic_rewards'] = intrinsic_reward
     elif args.intrinsic_reward == "rnd":
         intrinsic_reward_fn.predictor_network.eval()
@@ -321,6 +337,7 @@ for epoch in trange(args.num_epochs):
         loss_accum.backward()
         torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), args.max_grad_norm)
         optimizer.step()    
+        print(loss_accum)
 
         if args.intrinsic_reward == "rnd":
             intrinsic_reward_fn.predictor_network.train()
