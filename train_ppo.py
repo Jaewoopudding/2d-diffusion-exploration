@@ -29,7 +29,7 @@ parser.add_argument('--device', type=str, default='cuda:0', help='Device to use 
 
 
 ## training
-parser.add_argument('--num_epochs', type=int, default=1000, help='Number of epochs for training')
+parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
 parser.add_argument('--distribution', type=str, default='elliptic_paraboloid', help='Distribution for training diffusion model')
 parser.add_argument('--train_batch_size', type=int, default=1000, help='Batch size for training')
 parser.add_argument('--num_inner_epochs', type=int, default=1, help='Number of inner epochs for training')
@@ -40,6 +40,7 @@ parser.add_argument('--clip_range', type=float, default=1e-4, help='Clipsping ra
 parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Maximum gradient norm for clipping')
 
 parser.add_argument('--intrinsic_reward', type=str, default="differentiable_pseudo_count", help='Class of intrinsic reward')
+parser.add_argument('--intrinsic_reward_normalization', type=str, default="none", help='Normalization of intrinsic reward')
 parser.add_argument('--beta', type=float, default=0.1,  help='Coefficient for the intrinsic reward')
 parser.add_argument('--reward_fn_configs', type=str, default="rewardfns/configs/GMM/gmm_covariance1.0_center1_00_uniform.pkl", help='Reward model configurations path')
 
@@ -57,6 +58,8 @@ parser.add_argument('--datanum', type=int, default=50000, help='Number of data p
 
 args = parser.parse_args()
 
+assert not ((args.intrinsic_reward_normalization == 'none') and (args.intrinsic_reward_normalization != 'none'))
+assert args.intrinsic_reward in ['none', 'differentiable_pseudo_count', 'differentiable_last_pseudo_count', 'non_differentiable_pseudo_count', 'state_entropy']
 
 image_dir = f"images/{args.distribution}"
 model_dir = f"models/{args.distribution}"
@@ -73,7 +76,7 @@ logging_nm = args.reward_fn_configs.split("/")[-1].split(".")[0]
 wandb.init(
     entity='gda-for-orl',
     project='toy-explore',
-    name=f"{args.distribution}_{logging_nm}-kl:{args.kl_divergence_coef}",
+    name=f"{args.distribution}_{logging_nm}-kl:{args.kl_divergence_coef}-beta:{args.beta}-ir_norm:{args.intrinsic_reward_normalization}-ir:{args.intrinsic_reward}",
     config=vars(args)
 )
 
@@ -99,7 +102,7 @@ if args.kl_divergence_coef:
 
 optimizer = torch.optim.Adam(diffusion.parameters(), lr=1e-4)
 
-assert args.intrinsic_reward in ['none', 'differentiable_pseudo_count', 'differentiable_last_pseudo_count', 'non_differentiable_pseudo_count', 'state_entropy']
+
 intrinsic_reward_fn = intrinsic_reward_mapping.get(args.intrinsic_reward, lambda: None)(diffusion)
 
 reward_fn_name = args.reward_fn_configs.split("/")[-2]
@@ -149,20 +152,27 @@ for epoch in trange(args.num_epochs):
         for timestep in trange(args.sampling_timesteps):
             intrinsic_reward = intrinsic_reward_fn(latents[:, timestep].squeeze(), timesteps[0][timestep], cumulated_count=(epoch + 1) * args.train_batch_size)
             intrinsic_rewards.append(intrinsic_reward)
-        intrinsic_rewards = torch.stack(intrinsic_rewards, dim=1)
+        intrinsic_rewards = torch.stack(intrinsic_rewards, dim=1).clip(-10, 10)
         samples['intrinsic_rewards'] = intrinsic_rewards
     elif args.intrinsic_reward in ["differentiable_last_pseudo_count", "non_differentiable_pseudo_count", "state_entropy"]:
         intrinsic_rewards = []
-        intrinsic_reward = intrinsic_reward_fn(latents[:, args.sampling_timesteps - 1].squeeze(), 0, cumulated_count=(epoch + 1) * args.train_batch_size)
+        intrinsic_reward = intrinsic_reward_fn(latents[:, args.sampling_timesteps - 1].squeeze(), 0, cumulated_count=(epoch + 1) * args.train_batch_size).clip(-10, 10)
         samples['intrinsic_rewards'] = intrinsic_reward
+    else:
+        raise AssertionError
+
+    if args.intrinsic_reward_normalization == 'standard':
+        samples['intrinsic_rewards'] = (intrinsic_reward - intrinsic_reward.mean()) / (intrinsic_reward.std() + 1e-4)
+    elif args.intrinsic_reward_normalization == 'minmax':
+        samples['intrinsic_rewards'] = (intrinsic_reward - intrinsic_reward.min()) / (intrinsic_reward.max() - intrinsic_reward.min())
+    elif args.intrinsic_reward_normalization == 'none':
+        pass
     else:
         raise AssertionError
     
     for inner_epoch in range(args.num_inner_epochs):
         perm = torch.randperm(args.num_batches_per_epoch, device=device)
         samples = {k: v[perm] for k, v in samples.items()}
-
-
         perms = torch.stack(
             [
                 torch.randperm(args.sampling_timesteps - 1, device=device)
@@ -222,8 +232,8 @@ for epoch in trange(args.num_epochs):
                 )
                 
                 if args.intrinsic_reward in ["non_differentiable_pseudo_count", 'state_entropy']:
-                    advantages += args.beta * samples["intrinsic_rewards"]
-                    breakpoint()
+                    advantages += args.beta * samples["intrinsic_rewards"].detach()
+                    info["intrinsic_reward"].append(args.beta * samples["intrinsic_rewards"].detach().mean().item())
 
                 ratio = torch.exp(logprob - sample["logprobs"][:, j].squeeze(-1))
                 unclipped_loss = -advantages * ratio
