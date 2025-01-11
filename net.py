@@ -135,7 +135,31 @@ class MLP(nn.Module):
         x = torch.cat((x1_emb, x2_emb, t_emb), dim=-1)
         x = self.joint_mlp(x).unsqueeze(1)
         return x
-    
+
+
+class MLP4RND(nn.Module):
+    def __init__(self, hidden_size: int = 256, hidden_layers: int = 5, emb_size: int = 256, input_emb: str = "sinusoidal"):
+        super().__init__()
+        self.channels = 1
+        self.self_condition = False
+        self.input_mlp1 = PositionalEmbedding(emb_size, input_emb, scale=25.0)
+        self.input_mlp2 = PositionalEmbedding(emb_size, input_emb, scale=25.0)
+
+        concat_size = len(self.input_mlp1.layer) + len(self.input_mlp2.layer)
+        layers = [nn.Linear(concat_size, hidden_size), nn.GELU()]
+        for _ in range(hidden_layers):
+            layers.append(Block(hidden_size))
+        layers.append(nn.Linear(hidden_size, 2))
+        self.joint_mlp = nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = x.squeeze()
+        x1_emb = self.input_mlp1(x[:, 0])
+        x2_emb = self.input_mlp2(x[:, 1])
+        x = torch.cat((x1_emb, x2_emb), dim=-1)
+        x = self.joint_mlp(x).unsqueeze(1)
+        return x
+
     
 class UnclippedDiffusion(GaussianDiffusion1D):
     def __init__(self, **kwargs):
