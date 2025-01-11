@@ -25,7 +25,7 @@ tqdm = partial(tqdm.tqdm, dynamic_ncols=True)
 
 # Command-line arguments
 parser = argparse.ArgumentParser(description="Train a Gaussian Diffusion Model")
-parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for training')
+parser.add_argument('--device', type=str, default='cuda:4', help='Device to use for training')
 
 
 ## training
@@ -52,7 +52,7 @@ parser.add_argument('--kl_divergence_coef', type=float, default=0.01, help='Coef
 
 
 ## validation
-parser.add_argument('--datanum', type=int, default=50000, help='Number of data points in the dataset')
+parser.add_argument('--datanum', type=int, default=5000, help='Number of data points in the dataset')
 
 
 
@@ -146,6 +146,8 @@ for epoch in trange(args.num_epochs):
         
     advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-4)
     samples["advantages"] = advantages
+
+    del samples["rewards"]
 
     if args.intrinsic_reward == "differentiable_pseudo_count":
         intrinsic_rewards = []
@@ -296,8 +298,10 @@ for epoch in trange(args.num_epochs):
         loss_accum = loss_accum / args.sampling_timesteps
         loss_accum.backward()
         torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), args.max_grad_norm)
-        optimizer.step()
-        
+        optimizer.step()    
+
+
+
 
         # print(info)
         info = {k: np.mean(v) for k, v in info.items()}
@@ -307,12 +311,21 @@ for epoch in trange(args.num_epochs):
         )
         info = defaultdict(list)
 
+
     
     # Sample and log images after each epoch
-    if ((epoch +1) % 10) == 0: 
+    if ((epoch +1) % 200) == 0: 
         diffusion.model.eval()
-        latents, logprobs, img = diffusion.ddim_sample_with_logprob(batch_size=int(args.datanum/10), sampling_timesteps=args.sampling_timesteps)
-        sampled_images = img.squeeze(1).cpu().detach().numpy()  # Shape: (1000, 2)
+
+        iterations = args.datanum // args.train_batch_size
+        eval_samples = []
+        for i in range(iterations):
+            latents, logprobs, img = diffusion.ddim_sample_with_logprob(batch_size=args.train_batch_size, sampling_timesteps=args.sampling_timesteps)
+            sampled_images = img.squeeze(1).cpu().detach().numpy()  # Shape: (1000, 2)
+            eval_samples.append(sampled_images)
+            del latents, logprobs, img
+
+        sampled_images = np.concatenate(eval_samples, axis=0)
         within_bounds = np.all((sampled_images >= -5) & (sampled_images <= 5), axis=1)
         proportion_within_bounds = np.mean(within_bounds)
         plt.figure(figsize=(8, 8))
@@ -320,8 +333,8 @@ for epoch in trange(args.num_epochs):
         plt.title(f"Sampled Images at Epoch {epoch + 1} | {proportion_within_bounds * 100:.2f}%")
         plt.xlabel("Dimension 1")
         plt.ylabel("Dimension 2")
-        plt.xlim([-5,5])
-        plt.ylim([-5,5])
+        plt.xlim([-8,8])
+        plt.ylim([-8,8])
         plt.grid(True)
 
         # Save and log plot to wandb
