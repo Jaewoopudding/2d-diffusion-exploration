@@ -28,7 +28,7 @@ class DifferentiablePseudoCountReward(IntrinsicRewardBase):
 class NonDifferentiablePseudoCountReward(IntrinsicRewardBase):
     def compute_reward(self, sample, timestep, cumulated_count=None):
         log_likelihood, _, _ = self.diffusion.get_likelihood(sample, timestep)
-        return 1 / (torch.exp(log_likelihood)) ** 0.5
+        return 1 / ((torch.exp(log_likelihood)) ** 0.5 + 0.01)
     
     
 class StateEntropyReward(IntrinsicRewardBase):
