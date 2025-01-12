@@ -26,7 +26,7 @@ tqdm = partial(tqdm.tqdm, dynamic_ncols=True)
 
 # Command-line arguments
 parser = argparse.ArgumentParser(description="Train a Gaussian Diffusion Model")
-parser.add_argument('--device', type=str, default='cuda:4', help='Device to use for training')
+parser.add_argument('--device', type=str, default='cuda:0', help='Device to use for training')
 parser.add_argument('--seed', type=int, default=0, help='Random seed for training')
 
 
@@ -41,8 +41,8 @@ parser.add_argument('--clip_range', type=float, default=1e-4, help='Clipsping ra
 # parser.add_argument('--gradient_accumulation_steps', type=int, default=16, help='Number of gradient accumulation steps')
 parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Maximum gradient norm for clipping')
 
-parser.add_argument('--intrinsic_reward', type=str, default="none", help='Class of intrinsic reward')
-parser.add_argument('--intrinsic_reward_normalization', type=str, default="none", help='Normalization of intrinsic reward')
+parser.add_argument('--intrinsic_reward', type=str, default="rnd", help='Class of intrinsic reward')
+parser.add_argument('--intrinsic_reward_normalization', type=str, default="standard", help='Normalization of intrinsic reward')
 parser.add_argument('--intrinsic_reward_bound', type=float, default=10.0, help='Maximum absolute value of intrinsic reward')
 parser.add_argument('--beta', type=float, default=0.01,  help='Coefficient for the intrinsic reward')
 parser.add_argument('--reward_fn_configs', type=str, default="rewardfns/configs/GMM/gmm_covariance1.0_center1_00_uniform.pkl", help='Reward model configurations path')
@@ -190,13 +190,13 @@ for epoch in trange(args.num_epochs):
     elif args.intrinsic_reward == "rnd":
         intrinsic_reward_fn.predictor_network.eval()
         intrinsic_reward = intrinsic_reward_fn.compute_reward(latents[:, 1:]).detach()
-        samples['intrinsic_rewards'] = intrinsic_reward.sum(dim=tuple(range(1,intrinsic_reward.ndim)))
+        intrinsic_reward = intrinsic_reward.sum(dim=tuple(range(1,intrinsic_reward.ndim)))
+        samples['intrinsic_rewards'] = intrinsic_reward
         assert not torch.isnan(samples['intrinsic_rewards']).any()
     # elif args.intrinsic_reward == "none":
     #     pass
 
     #     raise AssertionError
-
     if args.intrinsic_reward_normalization == 'standard':
         samples['intrinsic_rewards'] = (intrinsic_reward - intrinsic_reward.mean()) / (intrinsic_reward.std() + 1e-4)
     elif args.intrinsic_reward_normalization == 'minmax':
