@@ -41,7 +41,7 @@ parser.add_argument('--clip_range', type=float, default=1e-4, help='Clipsping ra
 # parser.add_argument('--gradient_accumulation_steps', type=int, default=16, help='Number of gradient accumulation steps')
 parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Maximum gradient norm for clipping')
 
-parser.add_argument('--intrinsic_reward', type=str, default="rnd", help='Class of intrinsic reward')
+parser.add_argument('--intrinsic_reward', type=str, default="none", help='Class of intrinsic reward')
 parser.add_argument('--intrinsic_reward_normalization', type=str, default="none", help='Normalization of intrinsic reward')
 parser.add_argument('--intrinsic_reward_bound', type=float, default=10.0, help='Maximum absolute value of intrinsic reward')
 parser.add_argument('--beta', type=float, default=0.01,  help='Coefficient for the intrinsic reward')
@@ -91,8 +91,8 @@ set_seed(args.seed)
 logging_nm = args.reward_fn_configs.split("/")[-1].split(".")[0]
 wandb.init(
     entity='gda-for-orl',
-    project='toy-explore-rnd',
-    name=f"{args.distribution}_{logging_nm}-kl:{args.kl_divergence_coef}-beta:{args.beta}-ir_norm:{args.intrinsic_reward_normalization}-ir:{args.intrinsic_reward}",
+    project=f'toy-explore-{args.distribution}',
+    name=f"{args.distribution}_{logging_nm}-kl:{args.kl_divergence_coef}-beta:{args.beta}-ir_norm:{args.intrinsic_reward_normalization}-ir:{args.intrinsic_reward}-seed:{args.seed}",
     config=vars(args)
 )
 
@@ -337,7 +337,6 @@ for epoch in trange(args.num_epochs):
         loss_accum.backward()
         torch.nn.utils.clip_grad_norm_(diffusion.model.parameters(), args.max_grad_norm)
         optimizer.step()    
-        print(loss_accum)
 
         if args.intrinsic_reward == "rnd":
             intrinsic_reward_fn.predictor_network.train()
