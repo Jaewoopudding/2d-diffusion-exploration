@@ -41,11 +41,12 @@ parser.add_argument('--clip_range', type=float, default=1e-4, help='Clipsping ra
 # parser.add_argument('--gradient_accumulation_steps', type=int, default=16, help='Number of gradient accumulation steps')
 parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Maximum gradient norm for clipping')
 
-parser.add_argument('--intrinsic_reward', type=str, default="rnd", help='Class of intrinsic reward')
+parser.add_argument('--intrinsic_reward', type=str, default="non_differentiable_pseudo_count", help='Class of intrinsic reward')
 parser.add_argument('--intrinsic_reward_normalization', type=str, default="standard", help='Normalization of intrinsic reward')
 parser.add_argument('--intrinsic_reward_bound', type=float, default=10.0, help='Maximum absolute value of intrinsic reward')
 parser.add_argument('--beta', type=float, default=0.01,  help='Coefficient for the intrinsic reward')
 parser.add_argument('--reward_fn_configs', type=str, default="rewardfns/configs/GMM/gmm_covariance1.0_center1_00_uniform.pkl", help='Reward model configurations path')
+parser.add_argument('--lmbda', type=float, default=0.0,  help='OOD sampling coefficient from MOOD')
 
 
 ## sampling
@@ -92,7 +93,7 @@ logging_nm = args.reward_fn_configs.split("/")[-1].split(".")[0]
 wandb.init(
     entity='gda-for-orl',
     project=f'toy-explore-{args.distribution}',
-    name=f"{args.distribution}_{logging_nm}-kl:{args.kl_divergence_coef}-beta:{args.beta}-ir_norm:{args.intrinsic_reward_normalization}-ir:{args.intrinsic_reward}-seed:{args.seed}",
+    name=f"{args.distribution}_{logging_nm}-kl:{args.kl_divergence_coef}-beta:{args.beta}-lambda:{args.lmbda}-ir_norm:{args.intrinsic_reward_normalization}-ir:{args.intrinsic_reward}-seed:{args.seed}",
     config=vars(args)
 )
 
@@ -144,8 +145,8 @@ for epoch in trange(args.num_epochs):
     latents, logprobs, images = diffusion.ddim_sample_with_logprob(
         batch_size=args.num_batches_per_epoch,
         sampling_timesteps=args.sampling_timesteps,
+        lmbda=args.lmbda
     )
-
     latents = torch.stack(latents, dim = 1) # (batch_size, num_steps, 1, 2)
     logprobs = torch.stack(logprobs, dim = 1).unsqueeze(-1).detach() # (batch_size, num_steps-1 , 1)
     timesteps, timepairs = diffusion.prepare_ddim_timesteps(args.sampling_timesteps) 
@@ -178,7 +179,7 @@ for epoch in trange(args.num_epochs):
 
     if args.intrinsic_reward == "differentiable_pseudo_count":
         intrinsic_rewards = []
-        for timestep in trange(args.sampling_timesteps):
+        for timestep in range(args.sampling_timesteps):
             intrinsic_reward = intrinsic_reward_fn(latents[:, timestep].squeeze(), timesteps[0][timestep], cumulated_count=(epoch + 1) * args.train_batch_size)
             intrinsic_rewards.append(intrinsic_reward)
         intrinsic_rewards = torch.stack(intrinsic_rewards, dim=1).clip(-args.intrinsic_reward_bound, args.intrinsic_reward_bound)
@@ -197,14 +198,15 @@ for epoch in trange(args.num_epochs):
     #     pass
 
     #     raise AssertionError
-    if args.intrinsic_reward_normalization == 'standard':
-        samples['intrinsic_rewards'] = (intrinsic_reward - intrinsic_reward.mean()) / (intrinsic_reward.std() + 1e-4)
-    elif args.intrinsic_reward_normalization == 'minmax':
-        samples['intrinsic_rewards'] = (intrinsic_reward - intrinsic_reward.min()) / (intrinsic_reward.max() - intrinsic_reward.min())
-    elif args.intrinsic_reward_normalization == 'none':
-        pass
-    else:
-        raise AssertionError
+    if args.intrinsic_reward != 'none': 
+        if args.intrinsic_reward_normalization == 'standard':
+            samples['intrinsic_rewards'] = (intrinsic_reward - intrinsic_reward.mean()) / (intrinsic_reward.std() + 1e-4)
+        elif args.intrinsic_reward_normalization == 'minmax':
+            samples['intrinsic_rewards'] = (intrinsic_reward - intrinsic_reward.min()) / (intrinsic_reward.max() - intrinsic_reward.min())
+        elif args.intrinsic_reward_normalization == 'none':
+            pass
+        else:
+            raise AssertionError
     
     for inner_epoch in range(args.num_inner_epochs):
         perm = torch.randperm(args.num_batches_per_epoch, device=device)
@@ -242,9 +244,7 @@ for epoch in trange(args.num_epochs):
             desc=f"Epoch {epoch}| Inner Epoch {inner_epoch + 1}: training",
             position = 0,
         ):
-            for j in tqdm(
-                range(args.sampling_timesteps - 1),
-            ):
+            for j in range(args.sampling_timesteps - 1):
                 self_cond = None
                 clip_denoised = False
                 
@@ -358,7 +358,7 @@ for epoch in trange(args.num_epochs):
         
     
     # Sample and log images after each epoch
-    if ((epoch +1) % 200) == 0: 
+    if ((epoch +1) % 20) == 0: 
         diffusion.model.eval()
 
         iterations = args.datanum // args.train_batch_size
@@ -382,7 +382,7 @@ for epoch in trange(args.num_epochs):
         plt.grid(True)
 
         # Save and log plot to wandb
-        plot_file = f"images/{args.distribution}/epoch_{epoch + 1}_samples.png"
+        plot_file = f"images/{args.distribution}/epoch_{epoch + 1}_samples_{args.seed}.png"
         plt.savefig(plot_file, dpi=300)
         wandb.log(
             {
@@ -390,6 +390,38 @@ for epoch in trange(args.num_epochs):
                 "Proportion_Within_Bounds": proportion_within_bounds,
             },
             step = epoch
+        )
+        plt.close()
+        
+        x = torch.linspace(-8, 8, 50)
+        y = torch.linspace(-8, 8, 50)
+        grid_x, grid_y = torch.meshgrid(x, y, indexing="ij")
+        points = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=-1)
+        with torch.no_grad():
+            reward_values = intrinsic_reward_fn(points).detach().cpu().numpy()  # Assuming reward_fn outputs a tensor
+        reward_matrix = reward_values.reshape(grid_x.shape)
+        plt.figure(figsize=(10, 8))
+        plt.imshow(
+            reward_matrix,
+            extent=[-8, 8, -8, 8],
+            origin="lower",
+            cmap="viridis",
+            aspect="auto",
+        )
+        plt.colorbar(label="Reward Value")
+        plt.title(f"Reward Function Heatmap at Epoch {epoch + 1}")
+        plt.xlabel("Dimension 1")
+        plt.ylabel("Dimension 2")
+        plt.grid(False)
+
+        # Save and log plot to wandb
+        reward_plot_file = f"images/{args.distribution}/epoch_{epoch + 1}_reward_heatmap_{args.seed}.png"
+        plt.savefig(reward_plot_file, dpi=300)
+        wandb.log(
+            {
+                "reward_heatmap_epoch": wandb.Image(reward_plot_file),
+            },
+            step=epoch
         )
         plt.close()
 
